@@ -33,18 +33,34 @@ class FeatureProcessor:
 
     def get_features(self, id):
         """ Get the keypoints and the descriptors for features for the image with index id."""
-        raise NotImplementedError('Implement get_features!')
+        img = self.get_image(id)
+        kp, desc = self.orb.detectAndCompute(img, None)
+        return kp, desc
 
     def append_matches(self, matches, new_kp):
         """ Take the current matches and the current keypoints
         and append them to the list of consistent match locations. """
-        raise NotImplementedError('Implement append_matches!')
+        loc = -np.ones((self.n_features, 2))
+        for match in matches:
+            loc[match.queryIdx] = new_kp[match.trainIdx].pt
+        self.feature_match_locs.append(loc)
 
     def get_matches(self):
         """ Get all of the locations of features matches for each image to the features found in the
         first image. Output should be a numpy array of shape (num_images, num_features_first_image, 2), where
         the actual data is the locations of each feature in each image."""
-        raise NotImplementedError('Implement get_matches!')
+        for id in range(self.num_images):
+            kp, desc = self.get_features(id)
+            if self.first_matches:
+                self.features["kp"] = kp
+                self.features["kp_np"] = [p.pt for p in kp]
+                self.features["des"] = desc
+                self.n_features = len(kp)
+                self.first_matches = False
+            matches = self.bf.match(self.features["des"], desc)
+            self.append_matches(matches, kp)
+        ret = np.array(self.feature_match_locs)
+        return ret
 
 
 def triangulate(feature_data, tf, inv_K):
@@ -54,7 +70,40 @@ def triangulate(feature_data, tf, inv_K):
     You're free to use whatever method you like, but we recommend a solution based on least squares, similar
     to section 7.1 of Szeliski's book "Computer Vision: Algorithms and Applications". """
 
-    raise NotImplementedError('Implement triangulate!')
+    def compute_v_c(feature_loc, T):  # refer to textbook chapter 7.1 triangulation
+        feature = np.append(feature_loc, 1).reshape(3, 1)
+        R, c = T[:3, :3], T[:3, 3:4]
+        v = R @ inv_K @ feature
+        v = v / np.linalg.norm(v)
+        return (v, c)
+    cvs = [compute_v_c(feature_data[i], tf[i]) for i in range(tf.shape[0]) if (feature_data[i] != np.array((-1, -1))).all()]
+
+    def ransac(cvs):
+        cvs = np.array(cvs) # for list index
+        # hyperparameters
+        N = 3 # number of data to try
+        tol = 0.01  # tolerance
+        K = int(0.8 * len(cvs)) # threshold
+        L = 3000 # max number of iterations
+        # ransac
+        for i in range(L):
+            try:
+                rand_idx = np.random.randint(len(cvs), size=N)
+                # compute p = sum(I-vv^T)^-1 * sum((I-vv^T)c) # refer to textbook chapter 7.1 triangulation
+                sum_IvvT = sum([np.identity(3) - cv[0] @ cv[0].T for cv in cvs[rand_idx]])
+                sum_IvvT_c = sum([(np.identity(3) - cv[0] @ cv[0].T) @ cv[1] for cv in cvs[rand_idx]])
+                pc = np.linalg.inv(sum_IvvT) @ sum_IvvT_c
+                # compute error
+                r_sq = [np.linalg.norm((np.identity(3) - cv[0] @ cv[0].T) @ (pc - cv[1])) for cv in cvs]
+                k = sum(np.array(r_sq) < tol)
+                if k > K:
+                    return pc.T
+            except np.linalg.LinAlgError:
+                continue # singular matrix, this
+        assert False, "Ransac failed."
+    pc = ransac(cvs)
+
+    return pc
 
 def main():
     min_feature_views = 20  # minimum number of images a feature must be seen in to be considered useful
@@ -69,9 +118,33 @@ def main():
     feature_locations = f_processor.get_matches()  # output shape should be (num_images, num_features, 2)
 
     # feature rejection
-    raise NotImplementedError('(Optionally) implement feature rejection! (though we strongly recommend it)')
-    good_feature_locations = None  # delete this!
-    num_landmarks = 0  # delete this!
+    np.random.seed(0) # for reproducibility
+    # step 1 filter with min feature views
+    good_feature_locations = np.empty((feature_locations.shape[0], 0, 2))
+    num_landmarks = 0
+    for i in range(feature_locations.shape[1]):
+        candidate_freature_locations = feature_locations[:, i:i+1, :]
+        num_nonmatch = 0
+        for loc in feature_locations[:, i:i+1, :]:
+            if (loc[0] == np.array((-1, -1))).all():
+                num_nonmatch += 1
+        if num_nonmatch < good_feature_locations.shape[0] - min_feature_views:
+            good_feature_locations = np.concatenate((good_feature_locations, feature_locations[:, i:i+1, :]), axis=1)
+            num_landmarks += 1
+    # step 2 filter with ransac
+    feature_locations = good_feature_locations
+    good_feature_locations = np.empty((feature_locations.shape[0], 0, 2))
+    num_landmarks = 0
+    tf = sio.loadmat("l3_mapping_data/tf.mat")['tf']
+    tf_fixed = np.linalg.inv(tf[0, :, :]).dot(tf).transpose((1, 0, 2))
+    for i in range(feature_locations.shape[1]):
+        try:
+            triangulate(feature_locations[:, i, :], tf_fixed, inv_K)
+            good_feature_locations = np.concatenate((good_feature_locations, feature_locations[:, i:i+1, :]), axis=1)
+            num_landmarks += 1
+        except AssertionError:
+            continue # ransac failed
+    print("Number of selected landmarks: ", num_landmarks)
 
     pc = np.zeros((num_landmarks, 3))
 

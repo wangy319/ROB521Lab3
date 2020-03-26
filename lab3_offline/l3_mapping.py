@@ -58,6 +58,15 @@ class FeatureProcessor:
                 self.n_features = len(kp)
                 self.first_matches = False
             matches = self.bf.match(self.features["des"], desc)
+            # draw matches
+            num_match_draw = 100
+            matches = sorted(matches, key=lambda x: x.distance)
+            img_m = cv2.drawMatches(self.get_image(0), self.features["kp"], self.get_image(id), kp, matches[:num_match_draw], np.array([]), flags=2)
+            # cv2.imshow("Feature Match Id {}".format(id), img_m)
+            # cv2.waitKey(1000)
+            cv2.imwrite("feature_match/feature_match_{}.png".format(id), img_m)
+            print("Feature Match Id {}".format(id))
+
             self.append_matches(matches, kp)
         ret = np.array(self.feature_match_locs)
         return ret
@@ -116,6 +125,17 @@ def main():
     data_folder = os.path.join(os.getcwd(),'l3_mapping_data/')
     f_processor = FeatureProcessor(data_folder)
     feature_locations = f_processor.get_matches()  # output shape should be (num_images, num_features, 2)
+
+    # harris corner detection
+    img = f_processor.get_image(0)
+    harris_kp = cv2.cornerHarris(img, 2, 3, 0.04)
+    dst = cv2.dilate(harris_kp, None)
+    img_harris_corner = img.copy()
+    img_harris_corner[dst > 0.01 * dst.max()] = 255
+    # cv2.imshow('Harris Corner Detection', img_harris_corner)
+    # cv2.waitKey(1000)
+    cv2.imwrite('harris_corner.png', img_harris_corner)
+    print("harris_corner.png")
 
     # feature rejection
     np.random.seed(0) # for reproducibility
